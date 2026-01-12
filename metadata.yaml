@@ -1,6 +1,8 @@
-name: helloworld # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
-display_name: helloworld # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
-desc: AstrBot 插件示例。 # 插件简短描述
-version: v1.3.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: Soulter # 作者
-repo: https://github.com/Soulter/helloworld # 插件的仓库地址
+name: "astrbot_plugin_netease_music_pro_max"
+display_name: "PRO MAX版网易云点歌"
+desc: "AstrBot PRO MAX版网易云点歌\n\n这是一款为 AstrBot 设计的，功能强大且体验豪华的网易云音乐点歌插件。\n\n✨ 功能亮点\n交互式点歌：通过关键词搜索歌曲，机器人会返回一个列表供您选择。\n豪华信息卡片：播放时，会发送包含歌曲封面、详细信息（歌名、歌手、专辑、时长）的精美图文卡片。\n语音播放：直接发送可播放的语音消息，在聊天窗口即可享受音乐。\n智能音质回退：当您设定的最高音质不可用时（如VIP限制），插件会自动尝试获取次一级音质，大大提高播放成功率。\n多种触发方式：支持命令（如 /点歌）和自然语言（如 来一首...）两种方式点歌。\nWebUI配置：可在 AstrBot 的网页后台轻松配置各项参数。"
+author: "Azured改自NachoCrazy"
+repo: "https://github.com/Aoi-Karlin/astrbot_plugin_netease_music_pro_max"
+social_link: "https://github.com/Aoi-Karlin"
+version: "1.0"
+config: true

@@ -1,24 +1,282 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+"""
+Netease Music Enhanced Plugin for AstrBot
+- Author: Azured
+- Repo: https://github.com/Aoi-Karlin/astrbot_plugin_netease_music_pro_max
+- Features: Interactive song selection, cover display, audio playback, and auto quality fallback.
+"""
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
-    def __init__(self, context: Context):
+import re
+import time
+import base64
+import aiohttp
+import asyncio
+import urllib.parse
+from typing import Dict, Any, Optional, List
+
+from astrbot.api import star, logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.api.message_components import Plain, Image, Record
+
+# --- API Wrapper ---
+class NeteaseMusicAPI:
+    """
+    A wrapper for the NeteaseCloudMusicApi to simplify interactions.
+    Encapsulates API calls for searching, getting details, and fetching audio URLs.
+    """
+    def __init__(self, api_url: str, session: aiohttp.ClientSession, cookie: str = ""):
+        self.base_url = api_url.rstrip("/")
+        self.session = session
+        self.cookie = cookie  # <--- added this to allow logins
+
+    async def search_songs(self, keyword: str, limit: int) -> List[Dict[str, Any]]:
+        """Search for songs by keyword."""
+        url = f"{self.base_url}/search?keywords={urllib.parse.quote(keyword)}&limit={limit}&type=1"
+        async with self.session.get(url) as r:
+            r.raise_for_status()
+            data = await r.json()
+            return data.get("result", {}).get("songs", [])
+
+    async def get_song_details(self, song_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a single song."""
+        url = f"{self.base_url}/song/detail?ids={str(song_id)}"
+        async with self.session.get(url) as r:
+            r.raise_for_status()
+            data = await r.json()
+            return data["songs"][0] if data.get("songs") else None
+
+    async def get_audio_url(self, song_id: int, quality: str) -> Optional[str]:
+        """
+        Get the audio stream URL for a song with automatic quality fallback.
+        """
+        qualities_to_try = list(dict.fromkeys([quality, "exhigh", "higher", "standard"]))
+        for q in qualities_to_try:
+            # --- CHANGE:ADD COOKIE STRING TO END OF URL ---
+            encoded_cookie = urllib.parse.quote(self.cookie)
+            url = f"{self.base_url}/song/url/v1?id={str(song_id)}&level={q}&cookie={encoded_cookie}"
+            # --- CHANGE ENDED ---
+
+            async with self.session.get(url) as r:
+                r.raise_for_status()
+                data = await r.json()
+                audio_info = data.get("data", [{}])[0]
+                if audio_info.get("url"):
+                    return audio_info["url"]
+        return None
+    async def download_image(self, url: str) -> Optional[bytes]:
+        """Download image data from a URL."""
+        if not url:
+            return None
+        async with self.session.get(url) as r:
+            if r.status == 200:
+                return await r.read()
+        return None
+
+# --- Main Plugin Class ---
+class Main(star.Star):
+    """
+    I changed the original one to Luo Tianyi (A Chinese VOCALOID Singer.
+    """
+
+    def __init__(self, context, config: Optional[Dict[str, Any]] = None):
         super().__init__(context)
+        self.config = config or {}
+        self.config.setdefault("api_url", "http://127.0.0.1:3000")
+        self.config.setdefault("quality", "exhigh")
+        self.config.setdefault("search_limit", 5)
+
+        # --- 在这里插入你的 Cookie ---
+        self.config.setdefault("cookie",
+                               "")
+        self.waiting_users: Dict[str, Dict[str, Any]] = {}
+        self.song_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+        self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+
+        # --- 修改这里：把 cookie 传给 API ---
+        self.api = NeteaseMusicAPI(self.config["api_url"], self.http_session, self.config["cookie"])
+
+        self.cleanup_task: Optional[asyncio.Task] = None
+
+    # --- Lifecycle Hooks ---
 
     async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
-
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+        """Starts the background cleanup task when the plugin is activated."""
+        self.cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        logger.info("Netease Music plugin: Background cleanup task started.")
 
     async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        """Cleans up resources when the plugin is unloaded."""
+        if self.cleanup_task and not self.cleanup_task.done():
+            self.cleanup_task.cancel()
+            try:
+                await self.cleanup_task
+            except asyncio.CancelledError:
+                logger.info("Netease Music plugin: Background cleanup task cancelled.")
+        
+        if self.http_session and not self.http_session.closed:
+            await self.http_session.close()
+            logger.info("Netease Music plugin: HTTP session closed.")
+
+    async def _periodic_cleanup(self):
+        """A background task that runs periodically to clean up expired sessions."""
+        while True:
+            await asyncio.sleep(60)  # Run every 60 seconds
+            now = time.time()
+            expired_sessions = []
+            
+            for session_id, user_session in self.waiting_users.items():
+                if user_session['expire'] < now:
+                    expired_sessions.append((session_id, user_session['key']))
+            
+            if expired_sessions:
+                logger.info(f"Netease Music plugin: Cleaning up {len(expired_sessions)} expired session(s).")
+                for session_id, cache_key in expired_sessions:
+                    if session_id in self.waiting_users:
+                        del self.waiting_users[session_id]
+                    if cache_key in self.song_cache:
+                        del self.song_cache[cache_key]
+
+    # --- Event Handlers ---
+
+    @filter.command("点歌", alias={"music", "听歌", "网易云"}, priority=100)  # 提高指令优先级
+    async def cmd_handler(self, event: AstrMessageEvent, keyword: str = ""):
+        """Handles the '/点歌' command."""
+        # stop event if its a command
+        event.stop_event()
+
+        if not keyword.strip():
+            await event.send(MessageChain([Plain("主人，请告诉我您想听什么歌喵~ 例如：/点歌 Lemon")]))
+            return
+        await self.search_and_show(event, keyword.strip())
+
+    # 修改后的正则：增加 (?![\/!\?\.。]) 表示开头不能是这些指令符号
+    @filter.regex(
+        r"(?i)^(?![\/!\?\.。])(来.?一首|播放|听.?听|点歌|唱.?一首|来.?首)\s*([^\s].+?)(的歌|的歌曲|的音乐|歌|曲)?$")
+    async def natural_language_handler(self, event: AstrMessageEvent):
+        """Handles song requests in natural language."""
+        # 这里的正则已经排除了斜杠开头，所以不需要再写 if startswith 判断了
+        match = re.search(r"(?i)^(来.?一首|播放|听.?听|点歌|唱.?一首|来.?首)\s*([^\s].+?)(的歌|的歌曲|的音乐|歌|曲)?$",
+                          event.message_str)
+        if match:
+            keyword = match.group(2).strip()
+            if keyword:
+                await self.search_and_show(event, keyword)
+
+    @filter.regex(r"^\d+$", priority=999)
+    async def number_selection_handler(self, event: AstrMessageEvent):
+        """Handles user's numeric choice from the search results."""
+        session_id = event.get_session_id()
+        if session_id not in self.waiting_users:
+            return
+
+        user_session = self.waiting_users[session_id]
+        if time.time() > user_session["expire"]:
+            # Let the periodic cleanup handle the removal
+            return
+
+        try:
+            num = int(event.message_str.strip())
+        except ValueError:
+            return
+
+        limit = self.config.get("search_limit", 5)
+        if not (1 <= num <= limit):
+            return
+
+        event.stop_event()
+        await self.play_selected_song(event, user_session["key"], num)
+        
+        if session_id in self.waiting_users:
+            del self.waiting_users[session_id]
+
+    # --- Core Logic ---
+
+    async def search_and_show(self, event: AstrMessageEvent, keyword: str):
+        """Searches for songs and displays the results to the user."""
+        try:
+            songs = await self.api.search_songs(keyword, self.config["search_limit"])
+        except Exception as e:
+            logger.error(f"Netease Music plugin: API search failed. Error: {e!s}")
+            await event.send(MessageChain([Plain(f"API爆了...QAQ")]))
+            return
+
+        if not songs:
+            await event.send(MessageChain([Plain(f"对不起...天依不记得有「{keyword}」这首歌... T_T")]))
+            return
+
+        cache_key = f"{event.get_session_id()}_{int(time.time())}"
+        self.song_cache[cache_key] = songs
+
+        response_lines = [f"天依找到了 {len(songs)} 首歌哦，想听哪个？"]
+        for i, song in enumerate(songs, 1):
+            artists = " / ".join(a["name"] for a in song.get("artists", []))
+            album = song.get("album", {}).get("name", "未知专辑")
+            duration_ms = song.get("duration", 0)
+            dur_str = f"{duration_ms//60000}:{(duration_ms%60000)//1000:02d}"
+            response_lines.append(f"{i}. {song['name']} - {artists} 《{album}》 [{dur_str}]")
+
+        await event.send(MessageChain([Plain("\n".join(response_lines))]))
+
+        self.waiting_users[event.get_session_id()] = {"key": cache_key, "expire": time.time() + 60}
+
+    async def play_selected_song(self, event: AstrMessageEvent, cache_key: str, num: int):
+        """Plays the song selected by the user."""
+        if cache_key not in self.song_cache:
+            await event.send(MessageChain([Plain("啊呀，不选吗...那算了吧，等你想听再叫我哦...")]))
+            return
+
+        songs = self.song_cache[cache_key]
+        if not (1 <= num <= len(songs)):
+             await event.send(MessageChain([Plain("你在选什么呀笨蛋，选曲名前面的数字就好了呢...")]))
+             return
+             
+        selected_song = songs[num - 1]
+        song_id = selected_song["id"]
+        
+        try:
+            song_details = await self.api.get_song_details(song_id)
+            if not song_details:
+                raise ValueError("无法获取歌曲详细信息。")
+
+            audio_url = await self.api.get_audio_url(song_id, self.config["quality"])
+            if not audio_url:
+                await event.send(MessageChain([Plain(f"天依不太能唱这首歌呢...（版权/VIP原因）")]))
+                return
+
+            title = song_details.get("name", "")
+            artists = " / ".join(a["name"] for a in song_details.get("ar", []))
+            album = song_details.get("al", {}).get("name", "未知专辑")
+            cover_url = song_details.get("al", {}).get("picUrl", "")
+            duration_ms = song_details.get("dt", 0)
+            dur_str = f"{duration_ms//60000}:{(duration_ms%60000)//1000:02d}"
+
+            await self._send_song_messages(event, num, title, artists, album, dur_str, cover_url, audio_url)
+
+        except Exception as e:
+            logger.error(f"Netease Music plugin: Failed to play song {song_id}. Error: {e!s}")
+            await event.send(MessageChain([Plain(f"咳咳，额...天依有点忘了怎么唱这首歌了...")]))
+        finally:
+            if cache_key in self.song_cache:
+                del self.song_cache[cache_key]
+
+    async def _send_song_messages(self, event: AstrMessageEvent, num: int, title: str, artists: str, album: str, dur_str: str, cover_url: str, audio_url: str):
+        """Constructs and sends the song info and audio messages."""
+        detail_text = f"""好的！请欣赏天依唱的第 {num} 首歌曲！
+
+♪ 歌名：{title}
+🎤 歌手：{artists}
+💿 专辑：{album}
+⏳ 时长：{dur_str}
+✨ 音质：{self.config['quality']}
+
+请听~ ♪~
+"""
+        info_components = [Plain(detail_text)]
+
+        image_data = await self.api.download_image(cover_url)
+        if image_data:
+            info_components.append(Image.fromBase64(base64.b64encode(image_data).decode()))
+
+        await event.send(MessageChain(info_components))
+        await event.send(MessageChain([Record(file=audio_url)]))

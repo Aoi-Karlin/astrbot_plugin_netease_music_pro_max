@@ -2,6 +2,8 @@
 
 这是一款为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 设计的，功能强大且体验豪华的网易云音乐点歌插件。
 
++Cookies使用方法：需要__csrf, MUSIC_U, MUSIC_R_U三个数值, 示例:MUSIC_U=xxx; MUSIC_R_U=xxx; __csrf=xxx;
+
 ## ✨ 功能亮点
 
 - **交互式点歌**：通过关键词搜索歌曲，机器人会返回一个列表供您选择。

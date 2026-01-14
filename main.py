@@ -172,7 +172,7 @@ class Main(star.Star):
         event.stop_event()
 
         if not keyword.strip():
-            await event.send(MessageChain([Plain("主人，请告诉我您想听什么歌喵~ 例如：/点歌 Lemon")]))
+            await event.send(MessageChain([Plain("请告诉天依您想听什么歌 例如：/点歌 Lemon")]))
             return
         await self.search_and_show(event, keyword.strip())
 

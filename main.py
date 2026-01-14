@@ -94,7 +94,7 @@ class Main(star.Star):
         # --- 修改点：拆分 Cookie 为三个字段适配 WebUI ---
         # 用户在 WebUI 中只需填入等号后面的值
         self.config.setdefault("music_u", "")      # 填入 MUSIC_U 的值
-        self.config.setdefault("__csrf", "")   # 填入 __csrf 的值
+        self.config.setdefault("csrf_token", "")   # 填入 __csrf 的值
         self.config.setdefault("music_r_u", "")    # 填入 MUSIC_R_U 的值
         # -------------------------------------------
 
@@ -114,7 +114,7 @@ class Main(star.Star):
         # --- 修改点：拼接 Cookie 字符串 ---
         # 自动加上键名和分号，用户只需提供值
         music_u = self.config.get("music_u", "").strip()
-        csrf = self.config.get("__csrf", "").strip()
+        csrf = self.config.get("csrf_token", "").strip()
         music_r_u = self.config.get("music_r_u", "").strip()
 
         # 构造完整的 Cookie 字符串

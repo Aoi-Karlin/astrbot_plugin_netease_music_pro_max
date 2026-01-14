@@ -2,7 +2,9 @@
 
 这是一款为 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 设计的，功能强大且体验豪华的网易云音乐点歌插件。
 
-+Cookies使用方法：需要__csrf, MUSIC_U, MUSIC_R_U三个数值, 示例:MUSIC_U=xxx; MUSIC_R_U=xxx; __csrf=xxx;
++Cookies使用方法：需要__csrf, MUSIC_U, MUSIC_R_U三个数值。
+
+## 该版本为Azured+Claude Sonnet 4.5重构版本，增加了Cookies的导入以及UX优化
 
 ## ✨ 功能亮点
 

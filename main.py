@@ -205,9 +205,10 @@ class Main(star.Star):
     @filter.regex(r"^\d+$", priority=999)
     async def number_selection_handler(self, event: AstrMessageEvent):
         """Handles user's numeric choice from the search results."""
-        session_id = event.get_session_id()
-        if session_id not in self.waiting_users:
+        user_key = f"{event.get_session_id()}_{event.get_sender_id()}"
+        if user_key not in self.waiting_users:
             return
+        user_session = self.waiting_users[user_key]
 
         user_session = self.waiting_users[session_id]
         if time.time() > user_session["expire"]:
@@ -234,8 +235,7 @@ class Main(star.Star):
         await self.play_selected_song(event, cache_key, num)
 
         # only remove waiting when used play_selected_songs.
-        if session_id in self.waiting_users:
-            del self.waiting_users[session_id]
+        self.waiting_users.pop(user_key, None)
 
     # --- Core Logic ---
 
@@ -269,7 +269,8 @@ class Main(star.Star):
 
         await event.send(MessageChain([Plain("\n".join(response_lines))]))
 
-        self.waiting_users[event.get_session_id()] = {"key": cache_key, "expire": time.time() + 60}
+        user_key = f"{event.get_session_id()}_{event.get_sender_id()}"
+        self.waiting_users[user_key] = {"key": cache_key, "expire": time.time() + 60}
 
     async def play_selected_song(self, event: AstrMessageEvent, cache_key: str, num: int):
         """Plays the song selected by the user."""

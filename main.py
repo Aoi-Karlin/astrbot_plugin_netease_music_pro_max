@@ -63,7 +63,7 @@ class NeteaseMusicAPI:
             async with self.session.get(url) as r:
                 r.raise_for_status()
                 data = await r.json()
-                # 修改：先检查列表是否为空
+                # 修复：先检查列表是否为空，避免 IndexError
                 data_list = data.get("data", [])
                 if data_list:  # 确保列表不为空
                     audio_info = data_list[0]
@@ -94,15 +94,15 @@ class Main(star.Star):
         self.config.setdefault("quality", "exhigh")
         self.config.setdefault("search_limit", 5)
 
-        # 添加警告
+        # 修复：添加警告提示默认配置
         if self.config["api_url"] == "http://127.0.0.1:3000":
             logger.warning("Netease Music plugin: 使用默认 API URL (127.0.0.1:3000)，"
                            "如果您的 API 服务在其他地址，请在配置中修改 api_url")
 
+        # Cookie 配置字段
         self.config.setdefault("music_u", "")
         self.config.setdefault("csrf_token", "")
         self.config.setdefault("music_r_u", "")
-        # -------------------------------------------
 
         self.waiting_users: Dict[str, Dict[str, Any]] = {}
         self.song_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -117,15 +117,13 @@ class Main(star.Star):
     async def initialize(self):
         """Starts the background cleanup task and initializes session when the plugin is activated."""
 
-        # --- 修改点：拼接 Cookie 字符串 ---
-        # 自动加上键名和分号，用户只需提供值
+        # 拼接 Cookie 字符串
         music_u = self.config.get("music_u", "").strip()
         csrf = self.config.get("csrf_token", "").strip()
         music_r_u = self.config.get("music_r_u", "").strip()
 
         # 构造完整的 Cookie 字符串
         full_cookie = f"MUSIC_U={music_u}; __csrf={csrf}; MUSIC_R_U={music_r_u};"
-        # -------------------------------
 
         self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
 
@@ -149,8 +147,17 @@ class Main(star.Star):
             await self.http_session.close()
             logger.info("Netease Music plugin: HTTP session closed.")
 
-        # 添加：调用父类的 terminate 方法
+        # 修复：调用父类的 terminate 方法
         await super().terminate()
+
+    def _get_user_key(self, event: AstrMessageEvent) -> str:
+        """
+        生成用户唯一标识，结合会话和发送者ID
+        确保不同用户的搜索会话互不干扰
+        """
+        session_id = event.get_session_id()
+        sender_id = event.message_obj.sender.user_id
+        return f"{session_id}_{sender_id}"
 
     async def _periodic_cleanup(self):
         """
@@ -162,18 +169,18 @@ class Main(star.Star):
                 now = time.time()
                 expired_sessions = []
 
-                for session_id, user_session in self.waiting_users.items():
+                # 修复：使用 user_key 进行清理
+                for user_key, user_session in self.waiting_users.items():
                     if user_session['expire'] < now:
-                        expired_sessions.append((session_id, user_session['key']))
+                        expired_sessions.append((user_key, user_session['key']))
 
                 if expired_sessions:
                     logger.info(f"Netease Music plugin: Cleaning up {len(expired_sessions)} expired session(s).")
-                    for session_id, cache_key in expired_sessions:
-                        if session_id in self.waiting_users:
-                            del self.waiting_users[session_id]
-                        if cache_key not in self.song_cache:
-                            continue
-                        del self.song_cache[cache_key]
+                    for user_key, cache_key in expired_sessions:
+                        if user_key in self.waiting_users:
+                            del self.waiting_users[user_key]
+                        if cache_key in self.song_cache:
+                            del self.song_cache[cache_key]
 
             except Exception as e:
                 logger.error(f"Netease Music plugin: Cleanup task error: {e!s}")
@@ -191,11 +198,9 @@ class Main(star.Star):
             return
         await self.search_and_show(event, keyword.strip())
 
-    # use REGEX_PATTERN instead
     @filter.regex(REGEX_PATTERN)
     async def natural_language_handler(self, event: AstrMessageEvent):
         """Handles song requests in natural language."""
-        # FIXED as DRY
         match = re.search(REGEX_PATTERN, event.message_str)
         if match:
             keyword = match.group(2).strip()
@@ -205,12 +210,13 @@ class Main(star.Star):
     @filter.regex(r"^\d+$", priority=999)
     async def number_selection_handler(self, event: AstrMessageEvent):
         """Handles user's numeric choice from the search results."""
-        user_key = f"{event.get_session_id()}_{event.get_sender_id()}"
+        # 修复：使用用户唯一Key，解决会话隔离问题
+        user_key = self._get_user_key(event)
+
         if user_key not in self.waiting_users:
             return
-        user_session = self.waiting_users[user_key]
 
-        user_session = self.waiting_users[session_id]
+        user_session = self.waiting_users[user_key]
         if time.time() > user_session["expire"]:
             return
 
@@ -235,7 +241,8 @@ class Main(star.Star):
         await self.play_selected_song(event, cache_key, num)
 
         # only remove waiting when used play_selected_songs.
-        self.waiting_users.pop(user_key, None)
+        if user_key in self.waiting_users:
+            del self.waiting_users[user_key]
 
     # --- Core Logic ---
 
@@ -256,7 +263,9 @@ class Main(star.Star):
             await event.send(MessageChain([Plain(f"对不起...天依不记得有「{keyword}」这首歌... T_T")]))
             return
 
-        cache_key = f"{event.get_session_id()}_{int(time.time())}"
+        # 修复：使用用户唯一Key，解决会话隔离问题
+        user_key = self._get_user_key(event)
+        cache_key = f"{user_key}_{int(time.time())}"
         self.song_cache[cache_key] = songs
 
         response_lines = [f"天依找到了 {len(songs)} 首歌哦，想听哪个？"]
@@ -269,7 +278,7 @@ class Main(star.Star):
 
         await event.send(MessageChain([Plain("\n".join(response_lines))]))
 
-        user_key = f"{event.get_session_id()}_{event.get_sender_id()}"
+        # 修复：使用用户唯一Key
         self.waiting_users[user_key] = {"key": cache_key, "expire": time.time() + 60}
 
     async def play_selected_song(self, event: AstrMessageEvent, cache_key: str, num: int):
@@ -283,7 +292,6 @@ class Main(star.Star):
         # Re-check
         if not (1 <= num <= len(songs)):
             await event.send(MessageChain([Plain(f"你在选什么呀..选曲名前面的数字（1-{len(songs)}）就好了呢...")]))
-            # use return to avoid mistakes
             return
 
         # Confirm song
@@ -315,8 +323,6 @@ class Main(star.Star):
         except Exception as e:
             logger.error(f"Netease Music plugin: Failed to play song {song_id}. Error: {e!s}")
             await event.send(MessageChain([Plain(f"咳咳，额...天依有点忘了怎么唱这首歌了...")]))
-
-        # Removed 'finally' to avoid cache cleared too fast.
 
     async def _send_song_messages(self, event: AstrMessageEvent, num: int, title: str, artists: str, album: str,
                                   dur_str: str, cover_url: str, audio_url: str):

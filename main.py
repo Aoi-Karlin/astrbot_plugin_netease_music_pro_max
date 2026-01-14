@@ -21,6 +21,7 @@ from astrbot.api.message_components import Plain, Image, Record
 # --- Constants ---
 # 含义：忽略大小写，不以指令前缀开头，匹配点歌关键词
 REGEX_PATTERN = r"(?i)^(?![\/!\?\.。])(来.?一首|播放|听.?听|点歌|唱.?一首|来.?首)\s*([^\s].+?)(的歌|的歌曲|的音乐|歌|曲)?$"
+REGEX_COMPILED = re.compile(REGEX_PATTERN)  # 预编译正则表达式，避免重复编译
 
 
 # --- API Wrapper ---
@@ -49,7 +50,8 @@ class NeteaseMusicAPI:
         async with self.session.get(url) as r:
             r.raise_for_status()
             data = await r.json()
-            return data["songs"][0] if data.get("songs") else None
+            songs = data.get("songs", [])
+            return songs[0] if songs else None  # 安全检查，避免 IndexError
 
     async def get_audio_url(self, song_id: int, quality: str) -> Optional[str]:
         """
@@ -201,8 +203,8 @@ class Main(star.Star):
     @filter.regex(REGEX_PATTERN)
     async def natural_language_handler(self, event: AstrMessageEvent):
         """Handles song requests in natural language."""
-        # filter.regex 已经保证了匹配，这里再次匹配是为了提取关键词
-        match = re.match(REGEX_PATTERN, event.message_str)
+        # 使用预编译的正则表达式，避免重复编译
+        match = REGEX_COMPILED.match(event.message_str)
         if match:
             keyword = match.group(2).strip()
             if keyword:
@@ -251,7 +253,8 @@ class Main(star.Star):
     async def search_and_show(self, event: AstrMessageEvent, keyword: str):
         """Searches for songs and displays the results to the user."""
         if not self.api:
-            await event.send(MessageChain([Plain("插件未正确初始化 QAQ")]))
+            await event.send(MessageChain([Plain("插件未正确初始化 QAQ，请联系管理员检查配置")]))
+            logger.error("Netease Music plugin: API not initialized. Check if initialize() was called.")
             return
 
         try:
@@ -265,8 +268,14 @@ class Main(star.Star):
             await event.send(MessageChain([Plain(f"对不起...天依不记得有「{keyword}」这首歌... T_T")]))
             return
 
-        # 修复：使用用户唯一Key，解决会话隔离问题
         user_key = self._get_user_key(event)
+        
+        # 清理该用户的旧缓存，避免内存泄漏
+        if user_key in self.waiting_users:
+            old_cache_key = self.waiting_users[user_key].get("key")
+            if old_cache_key and old_cache_key in self.song_cache:
+                del self.song_cache[old_cache_key]
+        
         cache_key = f"{user_key}_{int(time.time())}"
         self.song_cache[cache_key] = songs
 
@@ -280,7 +289,6 @@ class Main(star.Star):
 
         await event.send(MessageChain([Plain("\n".join(response_lines))]))
 
-        # 修复：使用用户唯一Key
         self.waiting_users[user_key] = {"key": cache_key, "expire": time.time() + 60}
 
     async def play_selected_song(self, event: AstrMessageEvent, cache_key: str, num: int):

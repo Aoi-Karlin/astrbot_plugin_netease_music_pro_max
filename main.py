@@ -63,9 +63,12 @@ class NeteaseMusicAPI:
             async with self.session.get(url) as r:
                 r.raise_for_status()
                 data = await r.json()
-                audio_info = data.get("data", [{}])[0]
-                if audio_info.get("url"):
-                    return audio_info["url"]
+                # 修改：先检查列表是否为空
+                data_list = data.get("data", [])
+                if data_list:  # 确保列表不为空
+                    audio_info = data_list[0]
+                    if audio_info.get("url"):
+                        return audio_info["url"]
         return None
 
     async def download_image(self, url: str) -> Optional[bytes]:
@@ -91,11 +94,14 @@ class Main(star.Star):
         self.config.setdefault("quality", "exhigh")
         self.config.setdefault("search_limit", 5)
 
-        # --- 修改点：拆分 Cookie 为三个字段适配 WebUI ---
-        # 用户在 WebUI 中只需填入等号后面的值
-        self.config.setdefault("music_u", "")      # 填入 MUSIC_U 的值
-        self.config.setdefault("csrf_token", "")   # 填入 __csrf 的值
-        self.config.setdefault("music_r_u", "")    # 填入 MUSIC_R_U 的值
+        # 添加警告
+        if self.config["api_url"] == "http://127.0.0.1:3000":
+            logger.warning("Netease Music plugin: 使用默认 API URL (127.0.0.1:3000)，"
+                           "如果您的 API 服务在其他地址，请在配置中修改 api_url")
+
+        self.config.setdefault("music_u", "")
+        self.config.setdefault("csrf_token", "")
+        self.config.setdefault("music_r_u", "")
         # -------------------------------------------
 
         self.waiting_users: Dict[str, Dict[str, Any]] = {}
@@ -143,26 +149,35 @@ class Main(star.Star):
             await self.http_session.close()
             logger.info("Netease Music plugin: HTTP session closed.")
 
+        # 添加：调用父类的 terminate 方法
+        await super().terminate()
+
     async def _periodic_cleanup(self):
         """
         A background task that runs periodically to clean up expired sessions.
         """
         while True:
-            await asyncio.sleep(60)
-            now = time.time()
-            expired_sessions = []
+            try:
+                await asyncio.sleep(60)
+                now = time.time()
+                expired_sessions = []
 
-            for session_id, user_session in self.waiting_users.items():
-                if user_session['expire'] < now:
-                    expired_sessions.append((session_id, user_session['key']))
+                for session_id, user_session in self.waiting_users.items():
+                    if user_session['expire'] < now:
+                        expired_sessions.append((session_id, user_session['key']))
 
-            if expired_sessions:
-                logger.info(f"Netease Music plugin: Cleaning up {len(expired_sessions)} expired session(s).")
-                for session_id, cache_key in expired_sessions:
-                    if session_id in self.waiting_users:
-                        del self.waiting_users[session_id]
-                    if cache_key in self.song_cache:
+                if expired_sessions:
+                    logger.info(f"Netease Music plugin: Cleaning up {len(expired_sessions)} expired session(s).")
+                    for session_id, cache_key in expired_sessions:
+                        if session_id in self.waiting_users:
+                            del self.waiting_users[session_id]
+                        if cache_key not in self.song_cache:
+                            continue
                         del self.song_cache[cache_key]
+
+            except Exception as e:
+                logger.error(f"Netease Music plugin: Cleanup task error: {e!s}")
+                # 继续运行，不让单次错误导致清理任务停止
 
     # --- Event Handlers ---
 

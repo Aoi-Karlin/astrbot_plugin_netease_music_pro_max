@@ -156,7 +156,7 @@ class Main(star.Star):
         确保不同用户的搜索会话互不干扰
         """
         session_id = event.get_session_id()
-        sender_id = event.message_obj.sender.user_id
+        sender_id = event.get_sender_id()  # 使用官方方法，符合 Law of Demeter
         return f"{session_id}_{sender_id}"
 
     async def _periodic_cleanup(self):
@@ -201,10 +201,12 @@ class Main(star.Star):
     @filter.regex(REGEX_PATTERN)
     async def natural_language_handler(self, event: AstrMessageEvent):
         """Handles song requests in natural language."""
-        match = re.search(REGEX_PATTERN, event.message_str)
+        # filter.regex 已经保证了匹配，这里再次匹配是为了提取关键词
+        match = re.match(REGEX_PATTERN, event.message_str)
         if match:
             keyword = match.group(2).strip()
             if keyword:
+                event.stop_event()  # 停止事件传播，避免触发 LLM
                 await self.search_and_show(event, keyword)
 
     @filter.regex(r"^\d+$", priority=999)
@@ -212,7 +214,7 @@ class Main(star.Star):
         """Handles user's numeric choice from the search results."""
         # 修复：使用用户唯一Key，解决会话隔离问题
         user_key = self._get_user_key(event)
-
+        
         if user_key not in self.waiting_users:
             return
 

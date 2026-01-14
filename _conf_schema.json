@@ -23,10 +23,22 @@
     "description": "每次搜索时，向用户展示的歌曲选项数量。",
     "default": 5
   },
-  "cookie": {
+  "music_u": {
     "type": "string",
-    "label": "登录用cookie, 若掉登录需要重新填",
-    "description": "用于登录的Cookies，格式：__csrf=xxx; MUSIC_U=xxx; MUSIC_R_U=xxx; remember_me=true",
+    "label": "MUSIC_U",
+    "description": "核心登录凭证。请在浏览器 Cookie 中找到 MUSIC_U 的值并粘贴在此（不需要 'MUSIC_U=' 前缀）。",
+    "default": ""
+  },
+  "csrf_token": {
+    "type": "string",
+    "label": "__csrf (CSRF Token)",
+    "description": "跨站防护凭证。请在浏览器 Cookie 中找到 __csrf 的值并粘贴在此。",
+    "default": ""
+  },
+  "music_r_u": {
+    "type": "string",
+    "label": "MUSIC_R_U",
+    "description": "辅助登录凭证。请在浏览器 Cookie 中找到 MUSIC_R_U 的值并粘贴在此。",
     "default": ""
   }
 }

@@ -236,7 +236,7 @@ class Main(star.Star):
 
     # --- Event Handlers ---
 
-    @filter.command("点歌", alias=None, priority=100)
+    @filter.command("点歌", alias=["music", "听歌", "网易云"], priority=100)
     async def cmd_handler(self, event: AstrMessageEvent):
         """Handles the '/点歌' command."""
         event.stop_event()
@@ -244,20 +244,40 @@ class Main(star.Star):
         # 从完整消息中提取关键词（去掉指令前缀）
         message_str = event.message_str.strip()
 
-        # 移除指令前缀（/点歌 或 /music 等）
-        # 获取所有可能的指令前缀
+        # 移除指令（点歌、/点歌、!music 等）
+        # 获取所有可能的指令名称
         command_names = ["点歌"]
         command_aliases = self.config.get("command_aliases", [])
         command_names.extend(command_aliases)
+        
+        # 获取所有配置的前缀
+        command_prefixes = self.config.get("command_prefixes", ["/", "!", "?", ".", "。"])
 
         keyword = message_str
-        for cmd in command_names:
-            # 匹配 /cmd 或 /cmd@bot 格式
-            pattern = rf"^/\s*{re.escape(cmd)}(?:@\S+)?\s*(.*)$"
-            match = re.match(pattern, message_str, re.IGNORECASE)
-            if match:
-                keyword = match.group(1).strip()
+        matched = False
+        
+        # 1. 首先尝试匹配带前缀的指令（/点歌、!music 等）
+        for prefix in command_prefixes:
+            for cmd in command_names:
+                escaped_prefix = re.escape(prefix)
+                pattern = rf"^{escaped_prefix}\s*{re.escape(cmd)}(?:@\S+)?\s*(.*)$"
+                match = re.match(pattern, message_str, re.IGNORECASE)
+                if match:
+                    keyword = match.group(1).strip()
+                    matched = True
+                    break
+            if matched:
                 break
+        
+        # 2. 如果没匹配到，尝试匹配不带前缀的指令（点歌、music 等）
+        # 这是因为 @filter.command 装饰器可能已经剥离了前缀
+        if not matched:
+            for cmd in command_names:
+                pattern = rf"^{re.escape(cmd)}(?:@\S+)?\s+(.+)$"
+                match = re.match(pattern, message_str, re.IGNORECASE)
+                if match:
+                    keyword = match.group(1).strip()
+                    break
 
         if not keyword:
             await event.send(MessageChain([Plain(self.config["msg_no_keyword"])]))

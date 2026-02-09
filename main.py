@@ -18,12 +18,6 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.api.message_components import Plain, Image, Record
 
-# --- Constants ---
-# 含义：忽略大小写，不以指令前缀开头，匹配点歌关键词
-REGEX_PATTERN = r"(?i)^(?![\/!\?\.。])(来.?一首|播放|听.?听|点歌|唱.?一首|来.?首)\s*([^\s].+?)(的歌|的歌曲|的音乐|歌|曲)?$"
-REGEX_COMPILED = re.compile(REGEX_PATTERN)  # 预编译正则表达式，避免重复编译
-
-
 # --- API Wrapper ---
 class NeteaseMusicAPI:
     """
@@ -106,6 +100,28 @@ class Main(star.Star):
         self.config.setdefault("csrf_token", "")
         self.config.setdefault("music_r_u", "")
 
+        # 正则触发词配置
+        self.config.setdefault("regex_triggers", ["来一首", "播放", "听听", "点歌", "唱一首", "来首"])
+        self.config.setdefault("command_prefixes", ["/", "!", "?", ".", "。"])
+        self.config.setdefault("command_aliases", ["music", "听歌", "网易云"])
+
+        # UX提示词配置
+        self.config.setdefault("msg_no_keyword", "请告诉天依您想听什么歌 例如：/点歌 Lemon")
+        self.config.setdefault("msg_searching", "")
+        self.config.setdefault("msg_api_error", "API爆了...QAQ")
+        self.config.setdefault("msg_no_results", "对不起...天依不记得有「{keyword}」这首歌... T_T")
+        self.config.setdefault("msg_search_results", "天依找到了 {count} 首歌哦，想听哪个？")
+        self.config.setdefault("msg_song_detail", "好的！请欣赏天依唱的第 {num} 首歌曲！\n\n♪ 歌名：{title}\n🎤 歌手：{artists}\n💿 专辑：{album}\n⏳ 时长：{duration}\n✨ 音质：{quality}\n\n请听~ ♪~")
+        self.config.setdefault("msg_no_audio_url", "天依不太能唱这首歌呢...（版权/VIP原因）")
+        self.config.setdefault("msg_play_error", "咳咳，额...天依有点忘了怎么唱这首歌了...")
+        self.config.setdefault("msg_cache_expired", "搜索结果已经凉掉了哦，请重新点歌吧~")
+        self.config.setdefault("msg_invalid_selection", "你在选什么呀..选曲名前面的数字（1-{max}）就好了呢...")
+        self.config.setdefault("msg_init_error", "插件未正确初始化 QAQ，请联系管理员检查配置")
+
+        # 构建动态正则表达式
+        self.regex_pattern = self._build_regex_pattern()
+        self.regex_compiled = re.compile(self.regex_pattern, re.IGNORECASE)
+
         self.waiting_users: Dict[str, Dict[str, Any]] = {}
         self.song_cache: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -113,6 +129,36 @@ class Main(star.Star):
         self.http_session: Optional[aiohttp.ClientSession] = None
         self.api: Optional[NeteaseMusicAPI] = None
         self.cleanup_task: Optional[asyncio.Task] = None
+
+    def _build_regex_pattern(self) -> str:
+        """根据配置的触发词和指令前缀构建正则表达式"""
+        triggers = self.config.get("regex_triggers", [])
+        prefixes = self.config.get("command_prefixes", ["/", "!", "?", ".", "。"])
+
+        if not triggers:
+            # 如果没有配置触发词，返回一个匹配不到任何内容的正则
+            return r"^$"
+
+        # 对触发词进行正则转义
+        escaped_triggers = [re.escape(trigger) for trigger in triggers]
+        triggers_part = "|".join(escaped_triggers)
+
+        # 对指令前缀进行正则转义（用于负向前瞻断言）
+        # 构建字符集，例如：[\/!\?\.]
+        escaped_prefixes = [re.escape(p) for p in prefixes]
+        prefixes_part = "".join(escaped_prefixes)
+
+        # 构建完整的正则表达式
+        # (?![...]) 是负向前瞻断言，确保不匹配以指令前缀开头的消息
+        # 触发词必须在句首（在负向前瞻断言之后）
+        # 匹配：非指令前缀开头 + 触发词 + 任意内容 + 可选的结尾词
+        if prefixes_part:
+            pattern = rf"^(?![{prefixes_part}])(?:{triggers_part})\s*(.+?)(?:的歌|的歌曲|的音乐|歌|曲)?$"
+        else:
+            # 如果没有配置前缀，则不使用负向前瞻断言
+            pattern = rf"^(?:{triggers_part})\s*(.+?)(?:的歌|的歌曲|的音乐|歌|曲)?$"
+
+        return pattern
 
     # --- Lifecycle Hooks ---
 
@@ -190,23 +236,42 @@ class Main(star.Star):
 
     # --- Event Handlers ---
 
-    @filter.command("点歌", alias={"music", "听歌", "网易云"}, priority=100)
-    async def cmd_handler(self, event: AstrMessageEvent, keyword: str = ""):
+    @filter.command("点歌", alias=None, priority=100)
+    async def cmd_handler(self, event: AstrMessageEvent):
         """Handles the '/点歌' command."""
         event.stop_event()
 
-        if not keyword.strip():
-            await event.send(MessageChain([Plain("请告诉天依您想听什么歌 例如：/点歌 Lemon")]))
-            return
-        await self.search_and_show(event, keyword.strip())
+        # 从完整消息中提取关键词（去掉指令前缀）
+        message_str = event.message_str.strip()
 
-    @filter.regex(REGEX_PATTERN)
+        # 移除指令前缀（/点歌 或 /music 等）
+        # 获取所有可能的指令前缀
+        command_names = ["点歌"]
+        command_aliases = self.config.get("command_aliases", [])
+        command_names.extend(command_aliases)
+
+        keyword = message_str
+        for cmd in command_names:
+            # 匹配 /cmd 或 /cmd@bot 格式
+            pattern = rf"^/\s*{re.escape(cmd)}(?:@\S+)?\s*(.*)$"
+            match = re.match(pattern, message_str, re.IGNORECASE)
+            if match:
+                keyword = match.group(1).strip()
+                break
+
+        if not keyword:
+            await event.send(MessageChain([Plain(self.config["msg_no_keyword"])]))
+            return
+
+        await self.search_and_show(event, keyword)
+
+    @filter.regex(".*")
     async def natural_language_handler(self, event: AstrMessageEvent):
         """Handles song requests in natural language."""
-        # 使用预编译的正则表达式，避免重复编译
-        match = REGEX_COMPILED.match(event.message_str)
+        # 使用动态构建的正则表达式
+        match = self.regex_compiled.match(event.message_str)
         if match:
-            keyword = match.group(2).strip()
+            keyword = match.group(1).strip()
             if keyword:
                 event.stop_event()  # 停止事件传播，避免触发 LLM
                 await self.search_and_show(event, keyword)
@@ -216,12 +281,19 @@ class Main(star.Star):
         """Handles user's numeric choice from the search results."""
         # 修复：使用用户唯一Key，解决会话隔离问题
         user_key = self._get_user_key(event)
-        
+
         if user_key not in self.waiting_users:
             return
 
         user_session = self.waiting_users[user_key]
         if time.time() > user_session["expire"]:
+            # 缓存过期，发送提示消息
+            await event.send(MessageChain([Plain(self.config["msg_cache_expired"])]))
+            if user_key in self.waiting_users:
+                del self.waiting_users[user_key]
+            cache_key = user_session.get("key")
+            if cache_key and cache_key in self.song_cache:
+                del self.song_cache[cache_key]
             return
 
         try:
@@ -235,10 +307,15 @@ class Main(star.Star):
 
         # Cache lost: no response and return
         if not songs:
+            await event.send(MessageChain([Plain(self.config["msg_cache_expired"])]))
+            if user_key in self.waiting_users:
+                del self.waiting_users[user_key]
             return
 
         # Major fix: use len(songs) but not limit
         if not (1 <= num <= len(songs)):
+            invalid_msg = self.config["msg_invalid_selection"].format(max=len(songs))
+            await event.send(MessageChain([Plain(invalid_msg)]))
             return
 
         event.stop_event()
@@ -253,33 +330,40 @@ class Main(star.Star):
     async def search_and_show(self, event: AstrMessageEvent, keyword: str):
         """Searches for songs and displays the results to the user."""
         if not self.api:
-            await event.send(MessageChain([Plain("插件未正确初始化 QAQ，请联系管理员检查配置")]))
+            await event.send(MessageChain([Plain(self.config["msg_init_error"])]))
             logger.error("Netease Music plugin: API not initialized. Check if initialize() was called.")
             return
+
+        # 发送搜索中提示（如果配置不为空）
+        if self.config["msg_searching"]:
+            await event.send(MessageChain([Plain(self.config["msg_searching"])]))
 
         try:
             songs = await self.api.search_songs(keyword, self.config["search_limit"])
         except Exception as e:
             logger.error(f"Netease Music plugin: API search failed. Error: {e!s}")
-            await event.send(MessageChain([Plain(f"API爆了...QAQ")]))
+            await event.send(MessageChain([Plain(self.config["msg_api_error"])]))
             return
 
         if not songs:
-            await event.send(MessageChain([Plain(f"对不起...天依不记得有「{keyword}」这首歌... T_T")]))
+            no_results_msg = self.config["msg_no_results"].format(keyword=keyword)
+            await event.send(MessageChain([Plain(no_results_msg)]))
             return
 
         user_key = self._get_user_key(event)
-        
+
         # 清理该用户的旧缓存，避免内存泄漏
         if user_key in self.waiting_users:
             old_cache_key = self.waiting_users[user_key].get("key")
             if old_cache_key and old_cache_key in self.song_cache:
                 del self.song_cache[old_cache_key]
-        
+
         cache_key = f"{user_key}_{int(time.time())}"
         self.song_cache[cache_key] = songs
 
-        response_lines = [f"天依找到了 {len(songs)} 首歌哦，想听哪个？"]
+        # 使用可配置的搜索结果标题
+        results_title = self.config["msg_search_results"].format(count=len(songs))
+        response_lines = [results_title]
         for i, song in enumerate(songs, 1):
             artists = " / ".join(a["name"] for a in song.get("artists", []))
             album = song.get("album", {}).get("name", "未知专辑")
@@ -296,12 +380,13 @@ class Main(star.Star):
         songs = self.song_cache.get(cache_key)
 
         if not songs:
-            await event.send(MessageChain([Plain("搜索结果已经凉掉了哦，请重新点歌吧~")]))
+            await event.send(MessageChain([Plain(self.config["msg_cache_expired"])]))
             return
 
         # Re-check
         if not (1 <= num <= len(songs)):
-            await event.send(MessageChain([Plain(f"你在选什么呀..选曲名前面的数字（1-{len(songs)}）就好了呢...")]))
+            invalid_msg = self.config["msg_invalid_selection"].format(max=len(songs))
+            await event.send(MessageChain([Plain(invalid_msg)]))
             return
 
         # Confirm song
@@ -318,7 +403,7 @@ class Main(star.Star):
 
             audio_url = await self.api.get_audio_url(song_id, self.config["quality"])
             if not audio_url:
-                await event.send(MessageChain([Plain(f"天依不太能唱这首歌呢...（版权/VIP原因）")]))
+                await event.send(MessageChain([Plain(self.config["msg_no_audio_url"])]))
                 return
 
             title = song_details.get("name", "")
@@ -332,21 +417,20 @@ class Main(star.Star):
 
         except Exception as e:
             logger.error(f"Netease Music plugin: Failed to play song {song_id}. Error: {e!s}")
-            await event.send(MessageChain([Plain(f"咳咳，额...天依有点忘了怎么唱这首歌了...")]))
+            await event.send(MessageChain([Plain(self.config["msg_play_error"])]))
 
     async def _send_song_messages(self, event: AstrMessageEvent, num: int, title: str, artists: str, album: str,
                                   dur_str: str, cover_url: str, audio_url: str):
         """Constructs and sends the song info and audio messages."""
-        detail_text = f"""好的！请欣赏天依唱的第 {num} 首歌曲！
-
-♪ 歌名：{title}
-🎤 歌手：{artists}
-💿 专辑：{album}
-⏳ 时长：{dur_str}
-✨ 音质：{self.config['quality']}
-
-请听~ ♪~
-"""
+        # 使用可配置的歌曲详情模板
+        detail_text = self.config["msg_song_detail"].format(
+            num=num,
+            title=title,
+            artists=artists,
+            album=album,
+            duration=dur_str,
+            quality=self.config['quality']
+        )
         info_components = [Plain(detail_text)]
 
         # add None check
